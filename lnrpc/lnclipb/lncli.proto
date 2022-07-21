@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+import "verrpc/verrpc.proto";
+
+package lnclipb;
+
+option go_package = "github.com/brsuite/broln/lnrpc/lnclipb";
+
+message VersionResponse {
+    // The version information for brolncli.
+    verrpc.Version brolncli = 1;
+
+    // The version information for broln.
+    verrpc.Version broln = 2;
+};

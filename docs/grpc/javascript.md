@@ -1,0 +1,248 @@
+# How to write a simple `broln` client in Javascript using `node.js`
+
+## Setup and Installation
+
+First, you'll need to initialize a simple nodejs project:
+```
+npm init (or npm init -f if you want to use the default values without prompt)
+```
+
+Then you need to install the Javascript grpc and proto loader library
+dependencies:
+```
+npm install @grpc/grpc-js @grpc/proto-loader --save
+```
+
+You also need to copy the `broln` `lightning.proto` file in your project directory
+(or at least somewhere reachable by your Javascript code).
+
+The `lightning.proto` file is [located in the `lnrpc` directory of the `broln`
+sources](https://github.com/brsuite/broln/blob/master/lnrpc/lightning.proto).
+
+### Imports and Client
+
+Every time you work with Javascript gRPC, you will have to import `@grpc/grpc-js`, load
+`lightning.proto`, and create a connection to your client like so.
+
+Note that when an IP address is used to connect to the node (e.g. 192.168.1.21 instead of localhost) you need to add `--tlsextraip=192.168.1.21` to your `broln` configuration and re-generate the certificate (delete tls.cert and tls.key and restart broln).
+
+```js
+const grpc = require('@grpc/grpc-js');
+const protoLoader = require('@grpc/proto-loader');
+const fs = require("fs");
+
+// Due to updated ECDSA generated tls.cert we need to let gprc know that
+// we need to use that cipher suite otherwise there will be a handhsake
+// error when we communicate with the broln rpc server.
+process.env.GRPC_SSL_CIPHER_SUITES = 'HIGH+ECDSA'
+
+// We need to give the proto loader some extra options, otherwise the code won't
+// fully work with broln.
+const loaderOptions = {
+  keepCase: true,
+  longs: String,
+  enums: String,
+  defaults: true,
+  oneofs: true
+};
+const packageDefinition = protoLoader.loadSync('lightning.proto', loaderOptions);
+
+//  broln cert is at ~/.broln/tls.cert on Linux and
+//  ~/Library/Application Support/broln/tls.cert on Mac
+let brolnCert = fs.readFileSync("~/.broln/tls.cert");
+let credentials = grpc.credentials.createSsl(brolnCert);
+let lnrpcDescriptor = grpc.loadPackageDefinition(packageDefinition);
+let lnrpc = lnrpcDescriptor.lnrpc;
+let lightning = new lnrpc.Lightning('localhost:10019', credentials);
+```
+
+## Examples
+
+Let's walk through some examples of Javascript gRPC clients. These examples
+assume that you have at least two `broln` nodes running, the RPC location of one
+of which is at the default `localhost:10019`, with an open channel between the
+two nodes.
+
+### Simple RPC
+
+```js
+lightning.getInfo({}, function(err, response) {
+  if (err) {
+    console.log('Error: ' + err);
+  }
+  console.log('GetInfo:', response);
+});
+```
+
+You should get something like this in your console:
+
+```
+GetInfo: { identity_pubkey: '03c892e3f3f077ea1e381c081abb36491a2502bc43ed37ffb82e264224f325ff27',
+  alias: '',
+  num_pending_channels: 0,
+  num_active_channels: 1,
+  num_inactive_channels: 0,
+  num_peers: 1,
+  block_height: 1006,
+  block_hash: '198ba1dc43b4190e507fa5c7aea07a74ec0009a9ab308e1736dbdab5c767ff8e',
+  synced_to_chain: false,
+  testnet: false,
+  chains: [ 'brocoin' ] }
+```
+
+### Response-streaming RPC
+
+```js
+let call = lightning.subscribeInvoices({});
+call.on('data', function(invoice) {
+    console.log(invoice);
+})
+.on('end', function() {
+  // The server has finished sending
+})
+.on('status', function(status) {
+  // Process status
+  console.log("Current status" + status);
+});
+```
+
+Now, create an invoice for your node at `localhost:10019`and send a payment to
+it from another node.
+```bash
+$ brolncli addinvoice --amt=100
+{
+	"r_hash": <RHASH>,
+	"pay_req": <PAYMENT_REQUEST>
+}
+$ brolncli sendpayment --pay_req=<PAYMENT_REQUEST>
+```
+Your Javascript console should now display the details of the recently satisfied
+invoice.
+
+### Bidirectional-streaming RPC
+
+This example has a few dependencies:
+```shell
+⛰  npm install --save async lodash bytebuffer
+```
+
+You can run the following in your shell or put it in a program and run it like
+`node script.js`
+
+```js
+// Load some libraries specific to this example
+const async = require('async');
+const _ = require('lodash');
+const ByteBuffer = require('bytebuffer');
+
+let dest_pubkey = <RECEIVER_ID_PUBKEY>;
+let dest_pubkey_bytes = ByteBuffer.fromHex(dest_pubkey);
+
+// Set a listener on the bidirectional stream
+let call = lightning.sendPayment();
+call.on('data', function(payment) {
+  console.log("Payment sent:");
+  console.log(payment);
+});
+call.on('end', function() {
+  // The server has finished
+  console.log("END");
+});
+
+// You can send single payments like this
+call.write({ dest: dest_pubkey_bytes, amt: 6969 });
+
+// Or send a bunch of them like this
+function paymentSender(destination, amount) {
+  return function(callback) {
+    console.log("Sending " + amount + " satoshis");
+    console.log("To: " + destination);
+    call.write({
+      dest: destination,
+      amt: amount
+    });
+    _.delay(callback, 2000);
+  };
+}
+let payment_senders = [];
+for (let i = 0; i < 10; i++) {
+  payment_senders[i] = paymentSender(dest_pubkey_bytes, 100);
+}
+async.series(payment_senders, function() {
+  call.end();
+});
+
+```
+This example will send a payment of 100 satoshis every 2 seconds.
+
+
+### Using Macaroons
+
+To authenticate using macaroons you need to include the macaroon in the metadata
+of each request.
+
+The following snippet will add the macaroon to every request automatically:
+
+```js
+const fs = require('fs');
+const grpc = require('@grpc/grpc-js');
+const protoLoader = require('@grpc/proto-loader');
+const loaderOptions = {
+  keepCase: true,
+  longs: String,
+  enums: String,
+  defaults: true,
+  oneofs: true
+};
+const packageDefinition = protoLoader.loadSync('lightning.proto', loaderOptions);
+
+process.env.GRPC_SSL_CIPHER_SUITES = 'HIGH+ECDSA'
+
+// broln admin macaroon is at ~/.broln/data/chain/brocoin/simnet/admin.macaroon on Linux and
+// ~/Library/Application Support/broln/data/chain/brocoin/simnet/admin.macaroon on Mac
+let m = fs.readFileSync('~/.broln/data/chain/brocoin/simnet/admin.macaroon');
+let macaroon = m.toString('hex');
+
+// build meta data credentials
+let metadata = new grpc.Metadata()
+metadata.add('macaroon', macaroon)
+let macaroonCreds = grpc.credentials.createFromMetadataGenerator((_args, callback) => {
+  callback(null, metadata);
+});
+
+// build ssl credentials using the cert the same as before
+let brolnCert = fs.readFileSync("~/.broln/tls.cert");
+let sslCreds = grpc.credentials.createSsl(brolnCert);
+
+// combine the cert credentials and the macaroon auth credentials
+// such that every call is properly encrypted and authenticated
+let credentials = grpc.credentials.combineChannelCredentials(sslCreds, macaroonCreds);
+
+// Pass the crendentials when creating a channel
+let lnrpcDescriptor = grpc.loadPackageDefinition(packageDefinition);
+let lnrpc = lnrpcDescriptor.lnrpc;
+let client = new lnrpc.Lightning('some.address:10019', credentials);
+
+client.getInfo({}, (err, response) => {
+  if (err) {
+    console.log('Error: ' + err);
+  }
+  console.log('GetInfo:', response);
+});
+```
+
+## Conclusion
+
+With the above, you should have all the `broln` related `gRPC` dependencies
+installed locally in your project. In order to get up to speed with `protofbuf`
+usage from Javascript, see [this official `protobuf` reference for
+Javascript](https://developers.google.com/protocol-buffers/docs/reference/javascript-generated).
+Additionally, [this official gRPC
+resource](http://www.grpc.io/docs/tutorials/basic/node.html) provides more
+details around how to drive `gRPC` from `node.js`.
+
+## API documentation
+
+There is an [online API documentation](https://api.lightning.community?javascript)
+available that shows all currently existing RPC methods, including code snippets
+on how to use them.

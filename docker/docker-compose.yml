@@ -1,0 +1,55 @@
+version: '2'
+services:
+    # btc is an image of brocoin node which used as base image for brond and
+    # btccli. The environment variables default values determined on stage of
+    # container start within starting script.
+    brond:
+      image: brond
+      container_name: brond
+      build:
+        context: brond/
+      volumes:
+        - shared:/rpc
+        - brocoin:/data
+      environment:
+        - RPCUSER
+        - RPCPASS
+        - NETWORK
+        - DEBUG
+        - MINING_ADDRESS
+      entrypoint: ["./start-brond.sh"]
+
+    broln:
+      image: broln
+      container_name: broln
+      build:
+        context: ../
+        dockerfile: dev.Dockerfile
+      environment:
+        - RPCUSER
+        - RPCPASS
+        - NETWORK
+        - CHAIN
+        - DEBUG
+      volumes:
+        - shared:/rpc
+        - broln:/root/.broln
+      entrypoint: ["./start-broln.sh"]
+      links:
+        - "brond:blockchain"
+
+volumes:
+  # shared volume is need to store the brond rpc certificates and use it within
+  # bronctl and broln containers.
+  shared:
+    driver: local
+
+  # brocoin volume is needed for maintaining blockchain persistence
+  # during brond container recreation.
+  brocoin:
+    driver: local
+
+  # broln volume is used for persisting broln application data and chain state
+  # during container lifecycle.
+  broln:
+    driver: local
